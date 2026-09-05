@@ -14,6 +14,7 @@
 """
 import os
 import time
+import math
 import argparse
 
 import numpy as np
@@ -370,6 +371,18 @@ def main():
                 st, inr, mode, n_enemy = policy(res, frame, gp, pbox, prev_state, lock)
                 prev_state = st
 
+                # ---- M0b 109维状态(弹幕栅格参与决策) ----
+                detects = []
+                if res is not None and res[0].boxes is not None:
+                    for bb in res[0].boxes:
+                        x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
+                        detects.append((int(bb.cls[0]), x1, y1, x2, y2))
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                st109 = m0b_state(frame, detects, prev_state=prev_state,
+                                  prev_gray=prev_gray, hearts=hearts, include_drops=False)
+                prev_gray = gray
+                grid = st109["grid"]
+
                 # ---- 内部弹药估计(视觉看不清时也能维持装填纪律) ----
                 if st.get("ammo") is not None and st["ammo"] >= 1:
                     ammo_est = st["ammo"]
@@ -386,6 +399,28 @@ def main():
                 else:                                    # shoot / saw
                     can_fire = eff_ok and inr is not False
 
+                # ---- 风险感知(dodge)：朝向敌人的扇区弹幕威胁高 → 转向低危扇区、不射击 ----
+                dodge = False
+                ad = st.get("aim_deg")
+                if can_fire and ad is not None and len(grid) >= 48:
+                    sec = int((((ad % 360.0) + 360.0) % 360.0) // 22.5) % 16
+
+                    def sec_threat(s):
+                        return float(grid[s * 3] + grid[s * 3 + 1] + grid[s * 3 + 2])
+
+                    t_cur = sec_threat(sec)
+                    best = min(((s, sec_threat(s)) for s in range(16) if s != sec),
+                               key=lambda x: x[1])
+                    if t_cur > 0.18 and best[1] <= t_cur - 0.08:
+                        dodge = True
+                        can_fire = False
+                        dang = -180.0 + best[0] * 22.5 + 11.25
+                        rad = float((st.get("radius") or 700.0) * 0.6)
+                        tx = pbox[0] + rad * math.cos(math.radians(dang))
+                        ty = pbox[1] + rad * math.sin(math.radians(dang))
+                        _aim_at(gp, pbox, (tx, ty))
+                        mode = "dodge"
+
                 if can_fire:
                     last_hit = time.time()
                     if (time.time() - last_shot) >= FIRE_PERIOD_SEC:
@@ -398,25 +433,14 @@ def main():
                         if ammo_est <= 0:
                             ammo_est = 0
                             reload_until = time.time() + RELOAD_SEC
-                # ---- M0b 109维状态观测(只读,不改行为) ----
-                detects = []
-                if res is not None and res[0].boxes is not None:
-                    for bb in res[0].boxes:
-                        x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
-                        detects.append((int(bb.cls[0]), x1, y1, x2, y2))
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                st109 = m0b_state(frame, detects, prev_state=prev_state,
-                                  prev_gray=prev_gray, hearts=hearts, include_drops=False)
-                prev_gray = gray
-
                 if args.verbose and (time.time() - last_log) > 1.0:
                     last_log = time.time()
                     aim = round(st["aim_deg"], 1) if st["aim_deg"] is not None else None
                     c = st109["counts"]
-                    grid = st109["grid"]
                     gmax = int(np.argmax(grid)) if len(grid) and max(grid) > 0 else -1
                     dsec = ((gmax // 3) * 22.5) - 180 + 11.25 if gmax >= 0 else None
-                    print(f"  [DBG] 模式={mode} aim={aim} 半角={st['half']} inr={inr} 开火={can_fire}")
+                    print(f"  [DBG] 模式={mode} aim={aim} 半角={st['half']} inr={inr} "
+                          f"开火={can_fire} 闪避={dodge}")
                     print(f"        M0b109: 血={st109['hearts']} 弹={st109['ammo']} "
                           f"敌={st109['n_enemy']} 敌情={c} 近敌在射程={sum(r['inr'] for r in st109['nearest'])} "
                           f"弹数={st109['bullets']} 危险扇区角={dsec if dsec is not None else '-'} "
