@@ -309,6 +309,10 @@ def main():
         ammo_est = None
         reload_until = 0.0
         prev_gray = None
+        hurt_since = 0.0
+        prev_hp = None
+        last_aim_norm = None
+        hurt_from_ang = None
         while running["v"]:
             t0 = time.time()
             frame = np.array(sct.grab(monitor))
@@ -370,6 +374,15 @@ def main():
                 pbox = find_player(res, frame)
                 st, inr, mode, n_enemy = policy(res, frame, gp, pbox, prev_state, lock)
                 prev_state = st
+                if st.get("aim_deg") is not None:
+                    last_aim_norm = ((st["aim_deg"] % 360.0) + 180.0) / 360.0
+
+                # ---- 受伤记忆：血量下降 → 记录时间与"朝向"线索 ----
+                if prev_hp is not None and hearts < prev_hp and 0 < prev_hp - hearts <= 3 and prev_hp >= 2:
+                    hurt_since = time.time()
+                    hurt_from_ang = last_aim_norm
+                prev_hp = hearts
+                hurt_recent = max(0.0, 1.0 - (time.time() - hurt_since) / 1.5)
 
                 # ---- M0b 109维状态(弹幕栅格参与决策) ----
                 detects = []
@@ -379,7 +392,8 @@ def main():
                         detects.append((int(bb.cls[0]), x1, y1, x2, y2))
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 st109 = m0b_state(frame, detects, prev_state=prev_state,
-                                  prev_gray=prev_gray, hearts=hearts, include_drops=False)
+                                  prev_gray=prev_gray, hearts=hearts, include_drops=False,
+                                  hurt_recent=hurt_recent, hurt_from=hurt_from_ang)
                 prev_gray = gray
                 grid = st109["grid"]
 

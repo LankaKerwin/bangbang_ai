@@ -15,7 +15,7 @@ import numpy as np
 import cv2
 
 from ammo_detect import detect_ammo, half_angle_for_radius
-from bullet_grid import danger_grid, N_SECTORS, RINGS_PX
+from bullet_grid import danger_grid, obstacle_grid, N_SECTORS, RINGS_PX
 from drop_detect import detect_drops
 import bb_classes as B
 
@@ -39,11 +39,12 @@ def _grp(cid, big_saw):
 
 
 def m0b_state(bgr, detections, prev_state=None, prev_gray=None,
-              hearts=None, include_drops=True):
-    """汇总 M0b 全部感知 → 结构化状态 dict（M0b 收尾接口）。
+              hearts=None, include_drops=True, hurt_recent=0.0, hurt_from=None):
+    """汇总 M0b 全部感知 → 结构化状态 dict（M0b 收尾接口 + 受伤记忆/障碍栅格）。
 
     detections: [(cls_id, x1,y1,x2,y2), ...]（YOLO 原始框，含玩家）
-    返回 dict：self/enemies/grid/drops + 扁平向量字段说明见 m0b_vector。
+    hurt_recent: 最近受伤程度(0-1衰减); hurt_from: 受伤时朝向(0-1角度归一, 可None)
+    返回 dict：self/enemies/grid/obstacle/drops + 扁平向量见 m0b_vector。
     """
     h, w = bgr.shape[:2]
     player_c = None
@@ -87,9 +88,10 @@ def m0b_state(bgr, detections, prev_state=None, prev_gray=None,
     near.sort(key=lambda r: r["dist_norm"])
     near = near[:K_ENEMY]
 
-    # 3) 弹幕危险栅格(prev_gray 给定时只计移动弹)
+    # 3) 弹幕危险栅格(prev_gray 给定时只计移动弹) + 障碍物粗栅格
     bullets, grid = danger_grid(bgr, player_c, prev_gray=prev_gray)
     grid_list = [float(x) for x in grid]
+    obstacle = [float(x) for x in obstacle_grid(bgr, player_c)]
 
     # 4) 掉落候选(最近 K_DROP)
     drops = []
@@ -101,26 +103,31 @@ def m0b_state(bgr, detections, prev_state=None, prev_gray=None,
         drops = drops[:K_DROP]
 
     return {"hearts": hearts,
+            "hurt_recent": float(hurt_recent),
+            "hurt_from": hurt_from,
             "ammo": st["ammo"], "aim_norm": ((st["aim_deg"] if st["aim_deg"] is not None else 0.0) + 180) / 360,
             "aim_deg": st["aim_deg"], "radius": st["radius"], "half": st["half"],
             "n_enemy": len(boxes), "counts": counts,
-            "nearest": near, "grid": grid_list, "bullets": len(bullets),
+            "nearest": near, "grid": grid_list, "obstacle": obstacle,
+            "bullets": len(bullets),
             "drops": drops, "player_c": player_c}
 
 
-# 扁平向量布局：总长固定 = 1+2+3+4 +4+2 +K_ENEMY*5 + GRID_N + K_DROP*4
+# 扁平向量布局：总长固定 = 13 + K_ENEMY*5 + GRID_N + GRID_N(obstacle) + K_DROP*5 = 159
 def m0b_vector(st):
-    """把 m0b_state 转成固定长度 np.float32。
-    布局: [hearts, n_enemy]
+    """把 m0b_state 转成固定长度 np.float32（159 维）。
+    布局: [hearts/10, n_enemy/30, hurt_recent, hurt_from]
           [ammo, aim_norm, radius/2000, half/45]
-          [n_reg, n_ghost, n_hat, n_saw_small, n_saw_big] 各 /20
-          [nearest(K_ENEMY) × {ang_norm, dist_norm, grp/4, inr, dx}]
-          [grid GRID_N]
-          [drops(K_DROP) × {dx, dy, red, blue, diamond}]
+          [n_reg,n_ghost,n_hat,n_saw_small,n_saw_big 各 /20]
+          [nearest(K_ENEMY)×{ang_norm,dist_norm,grp/4,inr,dx}]
+          [grid GRID_N] [obstacle GRID_N]
+          [drops(K_DROP)×{dx,dy,red,blue,diamond}]
     """
     c = st["counts"]
     v = [0.0 if st["hearts"] is None else st["hearts"] / 10.0,
          st["n_enemy"] / 30.0,
+         st["hurt_recent"],
+         st["hurt_from"] if st["hurt_from"] is not None else 0.5,
          st["ammo"] if st["ammo"] is not None else -1.0,
          st["aim_norm"],
          (st["radius"] or 0.0) / 2000.0,
@@ -130,6 +137,7 @@ def m0b_vector(st):
     for r in st["nearest"]:
         v += [r["ang_norm"], r["dist_norm"], r["grp"] / 4.0, r["inr"], r["dx"]]
     v += list(st["grid"])
+    v += list(st["obstacle"])
     for _ in range(K_ENEMY - len(st["nearest"])):
         v += [0.0] * 5
     for (typ, dx, dy) in st["drops"]:

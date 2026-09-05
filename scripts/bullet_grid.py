@@ -122,3 +122,38 @@ def detect_drops(bgr, debug_draw=None):
 def grid_sector_angle(sec):
     """扇区中心角(度)供避让/调试用。"""
     return -180.0 + (sec + 0.5) * (360.0 / N_SECTORS)
+
+
+def obstacle_grid(bgr, player_center, rings=None):
+    """障碍物粗栅格(16扇区×N圈)：用边缘密度近似"实体区域"。
+    不区分敌人/藤蔓/电锯，只告诉决策层"哪个方向有东西"(YOLO漏检也能兜底)。"""
+    rings = rings or RINGS_PX
+    px, py = player_center
+    h, w = bgr.shape[:2]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 45, 130)
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges = cv2.dilate(edges, k, iterations=1)
+    g = np.zeros(N_SECTORS * len(rings), dtype=np.float32)
+    ys, xs = np.nonzero(edges)
+    if len(xs) == 0:
+        return g
+    dx = xs - px
+    dy = ys - py
+    d = np.hypot(dx, dy)
+    ang = np.degrees(np.arctan2(dy, dx))
+    secs = ((((ang + 180.0) % 360.0) // (360.0 / N_SECTORS)).astype(int)) % N_SECTORS
+    # 越近权重越大
+    coef = 1.0 / (1.0 + d / rings[-1])
+    for ri in range(len(rings)):
+        if ri == 0:
+            m = d <= rings[0]
+        else:
+            m = (d > rings[ri - 1]) & (d <= rings[ri])
+        if not m.any():
+            continue
+        for s in range(N_SECTORS):
+            mm = m & (secs == s)
+            if mm.any():
+                g[s * len(rings) + ri] += float(coef[mm].sum())
+    return g
