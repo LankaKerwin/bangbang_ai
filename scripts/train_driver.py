@@ -29,7 +29,8 @@ import bb_classes as B
 SAW_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("saw_")}
 GHOST_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("ghost_")}
 BUL_GHOST_DWELL = True   # 幽灵规则：锁定照射、不扣扳机
-GHOST_DWELL_SEC = 2.0    # 幽灵持续照射时长(听雨实测≈1.5s，保守取2.0s)
+GHOST_DWELL_SEC = 2.0    # 幽灵持续照射时长(实测≈1.5s，保守2.0s)
+EVENT_SAW_AREA_FRAC = 0.008   # 电锯框面积 > 帧面积×此比例 → 视为"事件电锯"(大,打不坏)
 
 # ===== 可调 =====
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,44 +121,69 @@ def _aim_at(gp, pbox, target):
     return True
 
 
-def policy(res, frame, gp, pbox, prev_state=None):
-    """规则化目标选择(正式规则 v1)：
-    1) 幽灵(存在时)：锁定最近幽灵持续照射【不扣扳机】→ mode='ghost'
-    2) 普通敌人：瞄准最近；在扇内且有弹 → 开火 mode='shoot'，否则等待 mode='wait'
-    3) 电锯：默认不打；若进射程(逼近→用后坐力推开)或场上无其它可打 → 可打 mode='saw'
+def policy(res, frame, gp, pbox, prev_state=None, lock=None):
+    """规则化目标选择 v2：
+    1) 幽灵：锁定照射(带2s dwell防抖动)，不扣扳机 → 'ghost'
+    2) 普通目标(含小电锯=可打碎)：瞄最近；扇内+有弹→shoot，否则 wait
+    3) 大电锯(事件,打不坏)：默认不打；进射程(自保推开)或场上无其它目标 → 可打 'saw'
     """
     st = state_from_frame(frame, pbox, prev_state)
     boxes = res[0].boxes if res is not None else None
     mode = "idle"
     can_fire = False
     if boxes is None or len(boxes) == 0:
+        if lock is not None:
+            lock.pop("gc", None)
         reset_controls(gp)
         return st, can_fire, mode, 0
 
-    regs, ghosts, saws = [], [], []
+    hh, ww = frame.shape[:2]
+    farea = hh * ww
+    regs, ghosts, saw_big = [], [], []
     for bb in boxes:
         cid = int(bb.cls[0])
         if cid == PLAYER_CLS:
             continue
         x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
         c = ((x1 + x2) / 2, (y1 + y2) / 2)
+        area = (x2 - x1) * (y2 - y1)
         if cid in GHOST_IDS:
             ghosts.append(c)
         elif cid in SAW_IDS:
-            saws.append(c)
+            if area > EVENT_SAW_AREA_FRAC * farea:
+                saw_big.append(c)          # 事件电锯(大)：默认不打
+            else:
+                regs.append(c)             # 普通电锯(可打碎)：当普通目标
         else:
             regs.append(c)
 
     def nearest(lst):
         return min(lst, key=lambda c: (c[0] - pbox[0]) ** 2 + (c[1] - pbox[1]) ** 2) if lst else None
 
-    # 1) 幽灵优先：锁定照射，不开火（光束不因后坐力偏移）
-    if ghosts:
-        g = nearest(ghosts)
-        _aim_at(gp, pbox, g)
-        return st, False, "ghost", len(ghosts)
+    def dist2(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
-    # 2) 普通敌人
+    # 1) 幽灵：带 lock(2s 容错) 锁定照射
+    if ghosts:
+        if lock is not None:
+            gc = lock.get("gc")
+            keep = gc is not None and (
+                any(dist2(gc, g2) < 80 * 80 for g2 in ghosts)
+                or (time.time() - lock.get("ts", 0.0) < GHOST_DWELL_SEC))
+            if keep:
+                t = gc
+            else:
+                t = nearest(ghosts)
+                lock["gc"] = t
+                lock["ts"] = time.time()
+        else:
+            t = nearest(ghosts)
+        _aim_at(gp, pbox, t)
+        return st, False, "ghost", len(ghosts)
+    if lock is not None:
+        lock.pop("gc", None)
+
+    # 2) 普通目标(含小电锯)
     if regs:
         e = nearest(regs)
         _aim_at(gp, pbox, e)
@@ -166,14 +192,14 @@ def policy(res, frame, gp, pbox, prev_state=None):
         mode = "shoot" if can_fire else "wait"
         return st, can_fire, mode, len(regs)
 
-    # 3) 电锯：默认不打；进射程(推进自保) 或 没有其它目标可打 → 可打
-    if saws:
-        s = nearest(saws)
+    # 3) 大电锯(事件)：默认不打；进射程(推开自保)或没有其它目标可打 → 可打
+    if saw_big:
+        s = nearest(saw_big)
         _aim_at(gp, pbox, s)
         inr = enemy_in_range(st, s, pbox)
         can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
         mode = "saw"
-        return st, can_fire, mode, len(saws)
+        return st, can_fire, mode, len(saw_big)
 
     reset_controls(gp)
     return st, False, mode, 0
@@ -273,6 +299,7 @@ def main():
         last_shop_act = 0.0
         prev_play = running["play"]
         prev_state = None
+        lock = {}
         while running["v"]:
             t0 = time.time()
             frame = np.array(sct.grab(monitor))
@@ -332,7 +359,7 @@ def main():
                     pass
             elif running["play"] and not dead and not args.dry:
                 pbox = find_player(res, frame)
-                st, can_fire, mode, n_enemy = policy(res, frame, gp, pbox, prev_state)
+                st, can_fire, mode, n_enemy = policy(res, frame, gp, pbox, prev_state, lock)
                 prev_state = st
                 if can_fire:
                     last_hit = time.time()
