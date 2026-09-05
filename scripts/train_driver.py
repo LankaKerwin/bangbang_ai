@@ -23,6 +23,12 @@ import vgamepad as vg
 from ultralytics import YOLO
 from auto_restart import _norm_mask_red, _count_solid_hearts  # 复用死亡检测
 from perception import state_from_frame, enemy_in_range        # M0b 感知
+import bb_classes as B
+
+# 类别分组(电锯=环境物默认不打; 幽灵=需持续照射)
+SAW_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("saw_")}
+GHOST_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("ghost_")}
+BUL_GHOST_DWELL = True   # 幽灵规则：锁定照射、不扣扳机
 
 # ===== 可调 =====
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,41 +105,77 @@ def find_player(res, frame):
     return (w / 2, h / 2)
 
 
-def policy(res, frame, gp, pbox, prev_state=None):
-    """用已预测 res + perception 状态判定。
-    返回 (state, 可开火?, 敌人数)。只负责 右摇杆满杆瞄准最近敌人；
-    开火由主循环按节奏扣 RT（框到且有弹才算可开火）。"""
-    st = state_from_frame(frame, pbox, prev_state)
-    boxes = res[0].boxes if res is not None else None
-    n_enemy = 0
-    if boxes is None or len(boxes) == 0:
-        reset_controls(gp)
-        return st, False, n_enemy
+def _aim_at(gp, pbox, target):
+    """右摇杆满杆指向 target。"""
     px, py = pbox
-    best, best_d = None, 1e18
-    for bb in boxes:
-        if int(bb.cls[0]) == PLAYER_CLS:
-            continue
-        n_enemy += 1
-        x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        d = (cx - px) ** 2 + (cy - py) ** 2
-        if d < best_d:
-            best_d, best = d, (cx, cy)
-    if best is None:
-        reset_controls(gp)
-        return st, False, n_enemy
-    dx, dy = best[0] - px, best[1] - py
+    dx, dy = target[0] - px, target[1] - py
     norm = (dx * dx + dy * dy) ** 0.5
     if norm <= 1:
         reset_controls(gp)
-        return st, False, n_enemy
+        return False
     gp.right_joystick_float(x_value_float=float(np.clip(dx / norm, -1, 1)),
                             y_value_float=float(np.clip(-dy / norm, -1, 1)))
-    inr = enemy_in_range(st, best, pbox)
-    can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
     gp.update()
-    return st, can_fire, n_enemy
+    return True
+
+
+def policy(res, frame, gp, pbox, prev_state=None):
+    """规则化目标选择(正式规则 v1)：
+    1) 幽灵(存在时)：锁定最近幽灵持续照射【不扣扳机】→ mode='ghost'
+    2) 普通敌人：瞄准最近；在扇内且有弹 → 开火 mode='shoot'，否则等待 mode='wait'
+    3) 电锯：默认不打；若进射程(逼近→用后坐力推开)或场上无其它可打 → 可打 mode='saw'
+    """
+    st = state_from_frame(frame, pbox, prev_state)
+    boxes = res[0].boxes if res is not None else None
+    mode = "idle"
+    can_fire = False
+    if boxes is None or len(boxes) == 0:
+        reset_controls(gp)
+        return st, can_fire, mode, 0
+
+    regs, ghosts, saws = [], [], []
+    for bb in boxes:
+        cid = int(bb.cls[0])
+        if cid == PLAYER_CLS:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
+        c = ((x1 + x2) / 2, (y1 + y2) / 2)
+        if cid in GHOST_IDS:
+            ghosts.append(c)
+        elif cid in SAW_IDS:
+            saws.append(c)
+        else:
+            regs.append(c)
+
+    def nearest(lst):
+        return min(lst, key=lambda c: (c[0] - pbox[0]) ** 2 + (c[1] - pbox[1]) ** 2) if lst else None
+
+    # 1) 幽灵优先：锁定照射，不开火（光束不因后坐力偏移）
+    if ghosts:
+        g = nearest(ghosts)
+        _aim_at(gp, pbox, g)
+        return st, False, "ghost", len(ghosts)
+
+    # 2) 普通敌人
+    if regs:
+        e = nearest(regs)
+        _aim_at(gp, pbox, e)
+        inr = enemy_in_range(st, e, pbox)
+        can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
+        mode = "shoot" if can_fire else "wait"
+        return st, can_fire, mode, len(regs)
+
+    # 3) 电锯：默认不打；进射程(推进自保) 或 没有其它目标可打 → 可打
+    if saws:
+        s = nearest(saws)
+        _aim_at(gp, pbox, s)
+        inr = enemy_in_range(st, s, pbox)
+        can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
+        mode = "saw"
+        return st, can_fire, mode, len(saws)
+
+    reset_controls(gp)
+    return st, False, mode, 0
 
 
 def dead_now(frame, z_center, z_hp):
@@ -289,20 +331,20 @@ def main():
                     pass
             elif running["play"] and not dead and not args.dry:
                 pbox = find_player(res, frame)
-                st, can_fire, n_enemy = policy(res, frame, gp, pbox, prev_state)
+                st, can_fire, mode, n_enemy = policy(res, frame, gp, pbox, prev_state)
                 prev_state = st
                 if can_fire:
                     last_hit = time.time()
-                # 半自动：可开火(框到且有弹)才按节奏扣扳机
-                if can_fire and (time.time() - last_shot) >= FIRE_PERIOD_SEC:
+                # 半自动：可开火(框到且有弹)才按节奏扣扳机(幽灵模式不扣)
+                if can_fire and mode != "ghost" and (time.time() - last_shot) >= FIRE_PERIOD_SEC:
                     gp.right_trigger_float(1.0); gp.update(); time.sleep(RT_PULSE_SEC)
                     gp.right_trigger_float(0.0); gp.update()
                     last_shot = time.time()
                 if args.verbose and (time.time() - last_log) > 1.0:
                     last_log = time.time()
                     aim = round(st["aim_deg"], 1) if st["aim_deg"] is not None else None
-                    print(f"  [DBG] 敌={n_enemy} 弹={st['ammo']} aim={aim} "
-                          f"半角={st['half']} 开火={can_fire} 商店={in_shop}")
+                    print(f"  [DBG] 模式={mode} 敌={n_enemy} 弹={st['ammo']} aim={aim} "
+                          f"半角={st['half']} 开火={can_fire}")
             else:
                 reset_controls(gp)  # 暂停态保持摇杆/扳机归零
 
