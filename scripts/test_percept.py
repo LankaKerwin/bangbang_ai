@@ -15,7 +15,8 @@ import numpy as np
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bullet_grid import danger_grid, detect_drops, grid_sector_angle, RINGS_PX  # noqa: E402
+from bullet_grid import danger_grid, grid_sector_angle, RINGS_PX  # noqa: E402
+from drop_detect import detect_drops                              # noqa: E402
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "models", "release", "bb_yolov8s_v1.pt")

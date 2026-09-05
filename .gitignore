@@ -26,3 +26,5 @@ Thumbs.db
 weights/
 tests/ammo_calib/_anno/
 
+tests/_percept_anno/
+
