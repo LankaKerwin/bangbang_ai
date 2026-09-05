@@ -29,6 +29,7 @@ import bb_classes as B
 SAW_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("saw_")}
 GHOST_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("ghost_")}
 BUL_GHOST_DWELL = True   # 幽灵规则：锁定照射、不扣扳机
+GHOST_DWELL_SEC = 2.0    # 幽灵持续照射时长(听雨实测≈1.5s，保守取2.0s)
 
 # ===== 可调 =====
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
