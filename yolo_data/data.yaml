@@ -1,0 +1,52 @@
+# 枪豆人 Bang Bang Barrage YOLO v1 数据配置
+# 类别与 scripts/bb_classes.py 保持一致（45 类；白眼球花已移除，待确认来源后再加回）
+path: D:\AI\AI train\bangbang_ai\yolo_data
+train: images/train
+val: images/val
+
+names:
+  0: player_boat
+  1: hand_green
+  2: hand_orange_thumb
+  3: hand_red_peace
+  4: hand_purple
+  5: hand_yellow_glove
+  6: hand_red_glove
+  7: hand_heart
+  8: hand_blue
+  9: hand_bracelet
+  10: hand_diamond
+  11: flower_cross
+  12: flower_cross_diag
+  13: flower_lily
+  14: flower_lily_pink
+  15: flower_bomb
+  16: flower_bomb_poison
+  17: flower_bomb_short
+  18: flower_bomb_big
+  19: pirate_normal
+  20: pirate_shield_spin
+  21: pirate_shield
+  22: pirate_cross
+  23: pirate_cross_diag
+  24: ghost_plain
+  25: ghost_chaser
+  26: ghost_hat
+  27: ghost_shield
+  28: ghost_diamond
+  29: vine_leaf
+  30: vine_cross
+  31: vine_cross_diag
+  32: vine_lily
+  33: vine_ghost
+  34: vine_diamond
+  35: saw_orange
+  36: saw_double
+  37: saw_diamond
+  38: boss_pirate
+  39: boss_pirate_shield
+  40: boss_pirate_lily
+  41: boss_pirate_shield_lily
+  42: boss_ghost
+  43: boss_vine_long
+  44: boss_saw_snake

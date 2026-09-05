@@ -1,0 +1,68 @@
+枪豆人 v1 标注小抄 —— 标的时候放旁边对照
+==================================================
+labelme 里直接输入【中文名】即可（空格可有可无），也可输【英文token】。
+红/蓝心心果手、原地心心手 → 统一标：心心果手
+钻石手、乱跑钻石手 → 统一标：钻石手
+(白眼球花已确认图鉴中不存在，已从清单移除)
+
+编号  中文名(推荐这样打)          英文token              备注
+0     玩家船                      player_boat            每帧必有
+1     抓抓绿手                    hand_green
+2     点赞橙手                    hand_orange_thumb
+3     比耶红手                    hand_red_peace
+4     追追紫手                    hand_purple
+5     黄手套手                    hand_yellow_glove
+6     红手套手                    hand_red_glove
+7     心心果手                    hand_heart             红/蓝/原地合并
+8     否定蓝手                    hand_blue
+9     钻石手镯手                  hand_bracelet          全关卡
+10    钻石手                      hand_diamond           奖励段(含乱跑)
+11    十字花                      flower_cross
+12    斜十字花                    flower_cross_diag
+13    铃兰                        flower_lily
+14    粉铃兰                      flower_lily_pink       有眼珠
+15    炸弹花                      flower_bomb
+16    毒炸弹花                    flower_bomb_poison
+17    短手炸弹花                  flower_bomb_short
+18    大炸弹花                    flower_bomb_big
+19    普通海盗                    pirate_normal          帽/无帽都算
+20    转转盾海盗                  pirate_shield_spin
+21    持盾海盗                    pirate_shield
+22    十字花海盗                  pirate_cross
+23    斜十字花海盗                pirate_cross_diag
+24    呆呆幽灵                    ghost_plain
+25    追追幽灵                    ghost_chaser
+26    帽子幽灵                    ghost_hat
+27    持盾幽灵                    ghost_shield
+28    钻石幽灵                    ghost_diamond          奖励段
+29    叶子藤蔓                    vine_leaf
+30    十字花藤蔓                  vine_cross
+31    斜十字花藤蔓                vine_cross_diag
+32    铃兰藤蔓                    vine_lily
+33    幽灵藤蔓                    vine_ghost
+34    钻石藤蔓                    vine_diamond           奖励段
+35    橙色电锯                    saw_orange
+36    双电锯                      saw_double
+37    钻石电锯                    saw_diamond
+38    大海盗                      boss_pirate
+39    持盾大海盗                  boss_pirate_shield
+40    铃兰大海盗                  boss_pirate_lily
+41    持盾铃兰大海盗              boss_pirate_shield_lily
+42    大幽灵                      boss_ghost
+43    长长藤蔓                    boss_vine_long
+44    电锯蛇                      boss_saw_snake
+==================================================
+【labelme 快捷键（矩形标注够用这几个）】
+  启动:   labelme "D:\AI\AI train\bangbang_ai\yolo_data\images\to_label\has_target"
+          (或打开程序后 Ctrl+U 选目录)
+  Ctrl+R  画矩形框(拖一下框住目标) → 弹框输入中文名 → 回车
+  Ctrl+S  保存当前图(json生成在图片同目录)
+  D / A   下一张 / 上一张
+  Ctrl+J  进入编辑模式(改错用)
+  Ctrl+E  改选中框的标签
+  Delete  删除选中的框
+  Ctrl+Z  撤销
+  T       隐藏/显示所有框(检查原图)
+  Ctrl+F  图片适应窗口   Ctrl+滚轮 缩放
+注意: 每张图把所有目标都框上; 框完记得 Ctrl+S; 标签打错可 Ctrl+J→点框→Ctrl+E 改。
+==================================================

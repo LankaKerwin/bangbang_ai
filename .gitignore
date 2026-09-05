@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 数据/素材（大文件不进 git）
+yolo_data/images/
+yolo_data/labels/*.cache
+runs/
+*.npz
+
+# 模型权重（模型另存 release 副本/外部管理，不进仓库）
+models/
+
+# 本地/系统杂项
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 环境
+*.log
+
+# Ȩ���ļ�����ֿ�
+*.pt
+weights/
