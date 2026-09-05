@@ -24,3 +24,5 @@ Thumbs.db
 # 权重文件不入仓库
 *.pt
 weights/
+tests/ammo_calib/_anno/
+

@@ -26,6 +26,18 @@ MIN_RAD_FRAC = 0.10                         # 排除玩家身边黄色发光(太
 # =====================================
 
 
+def half_angle_for_radius(r):
+    """由弹药弧半径(≈攻击距离)推断档位半张角(度)。人工验收定标 2026-09-05。
+    白/蓝 r<=775 → 15.5°；黄 r<=855 → 27°；红 >855 → 28.5°"""
+    if r is None:
+        return None
+    if r <= 775.0:
+        return 15.5
+    if r <= 855.0:
+        return 27.0
+    return 28.5
+
+
 def _yellow_mask(hsv):
     m1 = (hsv[:, :, 0] >= YELLOW_H_MIN) & (hsv[:, :, 0] <= YELLOW_H_MAX)
     m2 = hsv[:, :, 1] >= YELLOW_S_MIN
@@ -112,4 +124,66 @@ def detect_ammo(bgr, player_center, prev_radius=None, debug_draw=None):
             cv2.circle(debug_draw, (int(b["c"][0]), int(b["c"][1])), 8, (0, 255, 0), 2)
         cv2.putText(debug_draw, f"ammo={out['ammo']}", (10, 110),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+    return out
+
+
+def detect_arc_ends(bgr, player_center, prev_radius=None, aim_deg=None):
+    """找扇形黄弧两端的白色 × 十字标记 → 返回扇形边界角度。
+    思路：白色小十字位于弧半径环上、且在弹药点两侧最外端。
+    返回 {ends:(a_lo,a_hi)或None, half:半张角, radius, candidates:[(ang,dist,size),...]}
+    """
+    h, w = bgr.shape[:2]
+    info = detect_ammo(bgr, player_center, prev_radius=prev_radius)
+    r0 = info["radius"]
+    out = {"ends": None, "half": None, "radius": r0, "candidates": []}
+    if r0 is None:
+        return out
+
+    px, py = player_center
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    white = ((gray > 185) & (sat < 80)).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, k)
+    n, lab, stats, cents = cv2.connectedComponentsWithStats(white, 8)
+
+    ring_lo, ring_hi = r0 - 80, r0 + 80
+    cands = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area < 20 or area > 900:
+            continue
+        if bw > 40 or bh > 40:
+            continue
+        cx, cy = cents[i]
+        d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+        if not (ring_lo <= d <= ring_hi):
+            continue
+        a = float(np.degrees(np.arctan2(cy - py, cx - px)))
+        cands.append({"a": a, "d": d, "s": float(area)})
+    out["candidates"] = cands
+    if not cands:
+        return out
+
+    # 目标 aim：弹药点中点或传入
+    if aim_deg is None and info["angle_deg"] is not None:
+        angs = [b["a"] for b in info["dots"]]
+        aim_deg = float(np.degrees(np.arctan2(np.mean(np.sin(np.radians(angs))),
+                                              np.mean(np.cos(np.radians(angs))))))
+
+    def diff(a):
+        d = a - (aim_deg if aim_deg is not None else 0.0)
+        return (d + 180.0) % 360.0 - 180.0
+
+    # 取白色候选里 与 aim 夹角符号相反、|diff| 最大的一对(限制 -75..-8 与 8..75)
+    lefts = [c for c in cands if -75 <= diff(c["a"]) <= -8]
+    rights = [c for c in cands if 8 <= diff(c["a"]) <= 75]
+    if not lefts or not rights:
+        return out
+    a_lo = min(lefts, key=lambda c: abs(diff(c["a"]) - (-45)))["a"]
+    a_hi = min(rights, key=lambda c: abs(diff(c["a"]) - 45))["a"]
+    out["ends"] = (float(a_lo), float(a_hi))
+    half = (diff(a_hi) - diff(a_lo)) / 2.0
+    out["half"] = float(half)
     return out

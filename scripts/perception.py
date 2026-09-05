@@ -13,7 +13,7 @@ perception.py v0 — M0b 感知入口(先做 瞄准方向/范围)
 """
 import numpy as np
 
-from ammo_detect import detect_ammo
+from ammo_detect import detect_ammo, half_angle_for_radius
 
 
 def _circular_mean(angles_deg):
@@ -33,9 +33,11 @@ def state_from_frame(bgr, player_center, prev=None):
     st = {"ammo": info["ammo"],
           "aim_deg": None,
           "aim_width": None,
+          "half": None,
           "radius": info["radius"],
           "angle_range": info["angle_deg"],
           "dots": info["dots"]}
+    st["half"] = half_angle_for_radius(st["radius"])
     if info["dots"] and info["angle_deg"] is not None:
         angs = [b["a"] for b in info["dots"]]
         st["aim_deg"] = _circular_mean(angs)
