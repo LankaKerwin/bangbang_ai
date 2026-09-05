@@ -22,6 +22,7 @@ import mss
 import vgamepad as vg
 from ultralytics import YOLO
 from auto_restart import _norm_mask_red, _count_solid_hearts  # 复用死亡检测
+from perception import state_from_frame, enemy_in_range        # M0b 感知
 
 # ===== 可调 =====
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,16 +99,17 @@ def find_player(res, frame):
     return (w / 2, h / 2)
 
 
-def policy(model, frame, gp, pbox):
-    """返回 (是否看到敌人, 敌人数)。只负责右摇杆瞄准；开火由主循环用去抖控制。"""
-    res = model(frame, imgsz=640, conf=CONF, verbose=False)
-    boxes = res[0].boxes
+def policy(res, frame, gp, pbox, prev_state=None):
+    """用已预测 res + perception 状态判定。
+    返回 (state, 可开火?, 敌人数)。只负责 右摇杆满杆瞄准最近敌人；
+    开火由主循环按节奏扣 RT（框到且有弹才算可开火）。"""
+    st = state_from_frame(frame, pbox, prev_state)
+    boxes = res[0].boxes if res is not None else None
+    n_enemy = 0
     if boxes is None or len(boxes) == 0:
         reset_controls(gp)
-        return False, 0
-    h, w = frame.shape[:2]
+        return st, False, n_enemy
     px, py = pbox
-    n_enemy = 0
     best, best_d = None, 1e18
     for bb in boxes:
         if int(bb.cls[0]) == PLAYER_CLS:
@@ -120,18 +122,18 @@ def policy(model, frame, gp, pbox):
             best_d, best = d, (cx, cy)
     if best is None:
         reset_controls(gp)
-        return False, n_enemy
-    dx, dy = (best[0] - px), (best[1] - py)
+        return st, False, n_enemy
+    dx, dy = best[0] - px, best[1] - py
     norm = (dx * dx + dy * dy) ** 0.5
     if norm <= 1:
         reset_controls(gp)
-        return True, n_enemy
-    ax = dx / norm
-    ay = -dy / norm
-    gp.right_joystick_float(x_value_float=float(np.clip(ax, -1, 1)),
-                            y_value_float=float(np.clip(ay, -1, 1)))
+        return st, False, n_enemy
+    gp.right_joystick_float(x_value_float=float(np.clip(dx / norm, -1, 1)),
+                            y_value_float=float(np.clip(-dy / norm, -1, 1)))
+    inr = enemy_in_range(st, best, pbox)
+    can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
     gp.update()
-    return True, n_enemy
+    return st, can_fire, n_enemy
 
 
 def dead_now(frame, z_center, z_hp):
@@ -227,6 +229,7 @@ def main():
         last_log = 0.0
         last_shop_act = 0.0
         prev_play = running["play"]
+        prev_state = None
         while running["v"]:
             t0 = time.time()
             frame = np.array(sct.grab(monitor))
@@ -286,18 +289,20 @@ def main():
                     pass
             elif running["play"] and not dead and not args.dry:
                 pbox = find_player(res, frame)
-                found, n_enemy = policy(model, frame, gp, pbox)
-                if found:
+                st, can_fire, n_enemy = policy(res, frame, gp, pbox, prev_state)
+                prev_state = st
+                if can_fire:
                     last_hit = time.time()
-                fire_active = (time.time() - last_hit) < FIRE_KEEP_SEC
-                # 半自动：每隔 FIRE_PERIOD 扣一次扳机(按一次RT打一发)
-                if fire_active and (time.time() - last_shot) >= FIRE_PERIOD_SEC:
+                # 半自动：可开火(框到且有弹)才按节奏扣扳机
+                if can_fire and (time.time() - last_shot) >= FIRE_PERIOD_SEC:
                     gp.right_trigger_float(1.0); gp.update(); time.sleep(RT_PULSE_SEC)
                     gp.right_trigger_float(0.0); gp.update()
                     last_shot = time.time()
                 if args.verbose and (time.time() - last_log) > 1.0:
                     last_log = time.time()
-                    print(f"  [DEBUG] 敌人数={n_enemy} 可开火={fire_active} 商店={in_shop}")
+                    aim = round(st["aim_deg"], 1) if st["aim_deg"] is not None else None
+                    print(f"  [DBG] 敌={n_enemy} 弹={st['ammo']} aim={aim} "
+                          f"半角={st['half']} 开火={can_fire} 商店={in_shop}")
             else:
                 reset_controls(gp)  # 暂停态保持摇杆/扳机归零
 

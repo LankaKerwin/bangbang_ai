@@ -45,4 +45,28 @@ def state_from_frame(bgr, player_center, prev=None):
         # 0发/无点：沿用上一帧瞄准方向(装填期方向通常不变)
         st["aim_deg"] = prev["aim_deg"]
         st["radius"] = prev.get("radius")
+        st["half"] = prev.get("half")
     return st
+
+
+def _ang_diff(a, b):
+    """两角度差(度)，归一化到 [-180,180)。"""
+    d = a - b
+    return (d + 180.0) % 360.0 - 180.0
+
+
+def enemy_in_range(st, enemy_center, player_center, margin=0.10):
+    """敌人是否在当前攻击范围内：
+    ① 敌我距离 ≤ radius×(1+margin)  ② |敌人方向角 − aim_deg| ≤ half
+    缺半径/方向时返回 None(未知，不瞎开火)。"""
+    if st.get("radius") is None or st.get("aim_deg") is None or st.get("half") is None:
+        return None
+    px, py = player_center
+    ex, ey = enemy_center
+    dist = ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
+    if dist > st["radius"] * (1.0 + margin):
+        return False
+    e_ang = float(np.degrees(np.arctan2(ey - py, ex - px)))
+    if abs(_ang_diff(e_ang, st["aim_deg"])) > st["half"] + 2.0:
+        return False
+    return True
