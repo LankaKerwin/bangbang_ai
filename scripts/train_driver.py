@@ -326,7 +326,7 @@ def main():
                 if bx is not None and len(bx) > 0:
                     boat = any(int(b.cls[0]) == PLAYER_CLS for b in bx)
                 boat_run = boat_run + 1 if not boat else 0
-                dead = boat_run >= HEART_DEAD_FRAMES
+                dead = boat_run >= HEART_DEAD_FRAMES and hearts <= 0   # 船消失+血量空 才算真死
             else:
                 boat_run = 0
 
