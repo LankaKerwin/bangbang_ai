@@ -22,7 +22,7 @@ import mss
 import vgamepad as vg
 from ultralytics import YOLO
 from auto_restart import _norm_mask_red, _count_solid_hearts  # 复用死亡检测
-from perception import state_from_frame, enemy_in_range        # M0b 感知
+from perception import state_from_frame, enemy_in_range, m0b_state  # M0b 感知
 import bb_classes as B
 
 # 类别分组(电锯=环境物默认不打; 幽灵=需持续照射)
@@ -307,6 +307,7 @@ def main():
         lock = {}
         ammo_est = None
         reload_until = 0.0
+        prev_gray = None
         while running["v"]:
             t0 = time.time()
             frame = np.array(sct.grab(monitor))
@@ -397,11 +398,29 @@ def main():
                         if ammo_est <= 0:
                             ammo_est = 0
                             reload_until = time.time() + RELOAD_SEC
+                # ---- M0b 109维状态观测(只读,不改行为) ----
+                detects = []
+                if res is not None and res[0].boxes is not None:
+                    for bb in res[0].boxes:
+                        x1, y1, x2, y2 = [float(v) for v in bb.xyxy[0].tolist()]
+                        detects.append((int(bb.cls[0]), x1, y1, x2, y2))
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                st109 = m0b_state(frame, detects, prev_state=prev_state,
+                                  prev_gray=prev_gray, hearts=hearts, include_drops=False)
+                prev_gray = gray
+
                 if args.verbose and (time.time() - last_log) > 1.0:
                     last_log = time.time()
                     aim = round(st["aim_deg"], 1) if st["aim_deg"] is not None else None
-                    print(f"  [DBG] 模式={mode} 敌={n_enemy} 弹视觉={st['ammo']} "
-                          f"弹估={eff} aim={aim} 半角={st['half']} inr={inr} 开火={can_fire}")
+                    c = st109["counts"]
+                    grid = st109["grid"]
+                    gmax = int(np.argmax(grid)) if len(grid) and max(grid) > 0 else -1
+                    dsec = ((gmax // 3) * 22.5) - 180 + 11.25 if gmax >= 0 else None
+                    print(f"  [DBG] 模式={mode} aim={aim} 半角={st['half']} inr={inr} 开火={can_fire}")
+                    print(f"        M0b109: 血={st109['hearts']} 弹={st109['ammo']} "
+                          f"敌={st109['n_enemy']} 敌情={c} 近敌在射程={sum(r['inr'] for r in st109['nearest'])} "
+                          f"弹数={st109['bullets']} 危险扇区角={dsec if dsec is not None else '-'} "
+                          f"候选掉落={len(st109['drops'])}")
             else:
                 reset_controls(gp)  # 暂停态保持摇杆/扳机归零
 
