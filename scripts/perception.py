@@ -28,7 +28,8 @@ def state_from_frame(bgr, player_center, prev=None):
     """prev: 上一帧 state(dict)，用于 0发 时延续方向(可选)。
     返回 dict: ammo/aim_deg/radius/angle_range/dots
     （aim_width 暂不提供：弹药点挤在弧中部，不代表扇形张角；张角留给扇形边缘检测）"""
-    info = detect_ammo(bgr, player_center)
+    info = detect_ammo(bgr, player_center,
+                       prev_radius=(prev.get("radius") if prev else None))
     st = {"ammo": info["ammo"],
           "aim_deg": None,
           "aim_width": None,

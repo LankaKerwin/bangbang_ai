@@ -20,6 +20,7 @@ YELLOW_H_MIN, YELLOW_H_MAX = 18, 42      # 黄色色相带
 YELLOW_S_MIN, YELLOW_V_MIN = 110, 150    # 饱和/明度下限
 BLOB_AREA_MIN, BLOB_AREA_MAX = 90, 170   # 真弹药点≈12x12面积120-130；过小噪声/过大图标都滤掉
 RADIAL_BIN = 70                            # 半径分箱宽(px)，同一弧上的点距玩家相近
+RADIAL_TOL = 100                           # prev_radius 先验搜索容差(px)
 ANGLE_SPREAD_MAX = 140.0                   # 弧上各点角跨上限(霰弹扇形通常<120°)
 MIN_RAD_FRAC = 0.10                         # 排除玩家身边黄色发光(太近的忽略,占屏高比例)
 # =====================================
@@ -35,8 +36,10 @@ def _yellow_mask(hsv):
     return mask
 
 
-def detect_ammo(bgr, player_center, debug_draw=None):
-    """返回 {ammo, radius, angle_deg, dots}。debug_draw: 可选BGR图，会在上面画点返回。"""
+def detect_ammo(bgr, player_center, prev_radius=None, debug_draw=None):
+    """返回 {ammo, radius, angle_deg, dots}。
+    prev_radius: 上一帧弹药弧半径；给定时优先在它±RADIAL_TOL内找(时序最稳)。
+    debug_draw: 可选BGR图，会在上面画点返回。"""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     mask = _yellow_mask(hsv)
     n, lab, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
@@ -66,13 +69,23 @@ def detect_ammo(bgr, player_center, debug_draw=None):
     if not far:
         return out
 
-    # 径向分箱，但按半径从小到大找：选最近的一个"紧密角簇"
+    # 径向分箱；有 prev_radius 先验则优先在它±RADIAL_TOL内找，否则从近到远找最近紧密簇
     ds = np.array([b["d"] for b in far])
     bins = int((ds.max() - min_rad) // RADIAL_BIN) + 1
     hist, edges = np.histogram(ds, bins=bins, range=(min_rad, ds.max() + 1))
 
+    order = list(range(bins))
+    if prev_radius is not None:
+        cand = []
+        for i in range(bins):
+            mid = (edges[i] + edges[i + 1]) / 2
+            cand.append((abs(mid - prev_radius), i))
+        cand.sort()
+        prio = [i for _, i in cand if abs((edges[i] + edges[i + 1]) / 2 - prev_radius) <= RADIAL_TOL]
+        order = prio + [i for i in order if i not in prio]
+
     chosen = None
-    for bi in range(bins):
+    for bi in order:
         if hist[bi] < 1:
             continue
         r_lo, r_hi = edges[bi], edges[bi + 1]
