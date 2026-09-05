@@ -66,14 +66,27 @@ def _small_blobs(mask, amin, amax, smax):
     return out
 
 
-def detect_enemy_bullets(bgr):
+def detect_enemy_bullets(bgr, prev_gray=None, move_diff=8.0):
+    """敌方弹：小色块。prev_gray 给定时加"移动判据"——只算在动的(滤静止碎片/手/果)。"""
     mask = _mask_for_ranges(bgr, ENEMY_BULLET_HSV)
-    return _small_blobs(mask, BULLET_AREA_MIN, BULLET_AREA_MAX, BULLET_SQUARE_MAX)
+    blobs = _small_blobs(mask, BULLET_AREA_MIN, BULLET_AREA_MAX, BULLET_SQUARE_MAX)
+    if prev_gray is None:
+        return blobs
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(gray, prev_gray)
+    out = []
+    for (cx, cy, area) in blobs:
+        x0, y0 = max(0, int(cx) - 4), max(0, int(cy) - 4)
+        patch = diff[y0:y0 + 9, x0:x0 + 9]
+        if patch.size and float(np.mean(patch)) > move_diff:
+            out.append((cx, cy, area))
+    return out
 
 
-def danger_grid(bgr, player_center, debug_draw=None):
-    """返回 (bullets_xy, grid)。grid 形状 [N_SECTORS*len(RINGS_PX)]。"""
-    blobs = detect_enemy_bullets(bgr)
+def danger_grid(bgr, player_center, prev_gray=None, debug_draw=None):
+    """返回 (bullets_xy, grid)。grid 形状 [N_SECTORS*len(RINGS_PX)]。
+    prev_gray: 上一帧灰度；给定时敌弹只计"在动"的。"""
+    blobs = detect_enemy_bullets(bgr, prev_gray)
     px, py = player_center
     rings = len(RINGS_PX)
     grid = np.zeros(N_SECTORS * rings, dtype=np.float32)

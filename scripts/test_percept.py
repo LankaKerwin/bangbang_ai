@@ -65,10 +65,22 @@ def main():
         img = imread_u(f)
         if img is None:
             continue
-        pbox = find_player(img, model)
+        h, w = img.shape[:2]
+        enemy_boxes = []
+        pbox = (w / 2, h / 2)
+        if model is not None:
+            r = model(img, imgsz=640, conf=0.25, verbose=False)
+            bx = r[0].boxes
+            if bx is not None and len(bx) > 0:
+                for b in bx:
+                    x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
+                    if int(b.cls[0]) == 0:
+                        pbox = ((x1 + x2) / 2, (y1 + y2) / 2)
+                    else:
+                        enemy_boxes.append((x1, y1, x2, y2))
         vis = img.copy() if args.save else None
         bullets, grid = danger_grid(img, pbox, debug_draw=vis)
-        drops = detect_drops(img, debug_draw=vis)
+        drops = detect_drops(img, enemy_boxes=enemy_boxes, debug_draw=vis)
         worst = int(np.argmax(grid)) if grid.max() > 0 else None
         worst_deg = grid_sector_angle(worst // len(RINGS_PX)) if worst is not None else None
         dtxt = ",".join(d["type"] for d in drops[:8]) or "-"

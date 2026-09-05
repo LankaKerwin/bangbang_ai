@@ -55,8 +55,21 @@ def _nms(matches):
     return kept
 
 
-def detect_drops(bgr, debug_draw=None):
-    """形象模板匹配掉落物(半分辨率加速)。返回 drops 列表；可选 debug_draw 画框。"""
+def _blocked_by_big_enemy(cx, cy, area_self, boxes):
+    """候选中心在某个【明显更大的】YOLO敌人框内 → 排除(手/怪大, 果小)"""
+    if not boxes:
+        return False
+    for (x1, y1, x2, y2) in boxes:
+        if x1 <= cx <= x2 and y1 <= cy <= y2:
+            if (x2 - x1) * (y2 - y1) >= area_self * 4.0:
+                return True
+    return False
+
+
+def detect_drops(bgr, enemy_boxes=None, debug_draw=None):
+    """形象模板匹配掉落物(半分辨率加速)。
+    enemy_boxes: YOLO 检出的敌人框(排除，防手类静止怪当果)；左上HUD区固定排除。
+    返回 drops 列表；可选 debug_draw 画框。"""
     tpls = _load_templates()
     hh, ww = bgr.shape[:2]
     sh, sw = max(8, hh // 2), max(8, ww // 2)          # 半分辨率
@@ -93,10 +106,17 @@ def detect_drops(bgr, debug_draw=None):
                               "y": int(y * inv), "w": int(nw * inv), "h": int(nh * inv),
                               "typ": typ})
     kept = _nms(cands)
+    hh0, ww0 = bgr.shape[:2]
+    hud_zone = (0, 0, ww0 * 0.24, hh0 * 0.11)   # 左上血量/蓝星 HUD
     drops = []
     for k in kept:
         cx = k["x"] + k["w"] / 2
         cy = k["y"] + k["h"] / 2
+        in_hud = (cx < hud_zone[0] or cy < hud_zone[1]
+                  or cx > hud_zone[2] or cy > hud_zone[3])
+        blocked = _blocked_by_big_enemy(cx, cy, k["w"] * k["h"], enemy_boxes)
+        if in_hud or blocked:
+            continue
         drops.append({"type": k["typ"], "c": (float(cx), float(cy)),
                       "score": k["score"], "w": k["w"], "h": k["h"]})
         if debug_draw is not None:
