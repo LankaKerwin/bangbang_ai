@@ -225,7 +225,8 @@ def main():
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--verbose", action="store_true", help="打印检测/开火状态")
-    parser.add_argument("--no_shop", action="store_true", help="禁用商店检测(先把商店冻结关掉测战斗)")
+    parser.add_argument("--no_shop", action="store_true",
+                        help="[已弃用] 商店总是自动退出不购买，此参数不再禁用商店退出")
     args = parser.parse_args()
 
     model = YOLO(args.model)
@@ -337,7 +338,7 @@ def main():
                 boat_run = 0
 
             shop_score = 0.0
-            if not args.no_shop and shop_tpl is not None:
+            if shop_tpl is not None:   # 商店检测始终开启(进入就自动B+A退出，不购买)
                 shop_score = detect_shop(frame, shop_tpl)
                 shop_run = shop_run + 1 if shop_score > SHOP_SCORE else 0
                 in_shop = shop_run >= SHOP_PERSIST
