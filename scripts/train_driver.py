@@ -28,9 +28,11 @@ import bb_classes as B
 # 类别分组(电锯=环境物默认不打; 幽灵=需持续照射)
 SAW_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("saw_")}
 GHOST_IDS = {B.TOKEN_TO_ID[t] for t in B.TOKEN_TO_ID if t.startswith("ghost_")}
+HAT_GHOST_IDS = {B.TOKEN_TO_ID["ghost_hat"]}   # 帽子幽灵：先打帽才能照死
 BUL_GHOST_DWELL = True   # 幽灵规则：锁定照射、不扣扳机
 GHOST_DWELL_SEC = 2.0    # 幽灵持续照射时长(实测≈1.5s，保守2.0s)
 EVENT_SAW_AREA_FRAC = 0.008   # 电锯框面积 > 帧面积×此比例 → 视为"事件电锯"(大,打不坏)
+RELOAD_SEC = 2.5              # 内部弹药估计：打空后装填耗时估计(待实测微调)
 
 # ===== 可调 =====
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,20 +124,19 @@ def _aim_at(gp, pbox, target):
 
 
 def policy(res, frame, gp, pbox, prev_state=None, lock=None):
-    """规则化目标选择 v2：
-    1) 幽灵：锁定照射(带2s dwell防抖动)，不扣扳机 → 'ghost'
-    2) 普通目标(含小电锯=可打碎)：瞄最近；扇内+有弹→shoot，否则 wait
-    3) 大电锯(事件,打不坏)：默认不打；进射程(自保推开)或场上无其它目标 → 可打 'saw'
-    """
+    """规则化目标选择 v3：
+    1) 射程内有普通敌人 → 先打(不因幽灵打断) 'shoot'/'wait'
+    2) 幽灵(射程内无敌人时)：帽子幽灵先开火打帽 'hat'；普通幽灵锁定照射 'ghost'
+    3) 大电锯(事件) 默认不打；进射程或无可打才打 'saw'
+    返回 (st, inr(True/False/None), mode, n)。
+    inr=None = 感知读不到范围(如暴风雨)→ 不算"确定在范围外"，主循环允许开火。"""
     st = state_from_frame(frame, pbox, prev_state)
     boxes = res[0].boxes if res is not None else None
-    mode = "idle"
-    can_fire = False
     if boxes is None or len(boxes) == 0:
         if lock is not None:
             lock.pop("gc", None)
         reset_controls(gp)
-        return st, can_fire, mode, 0
+        return st, None, "idle", 0
 
     hh, ww = frame.shape[:2]
     farea = hh * ww
@@ -148,61 +149,65 @@ def policy(res, frame, gp, pbox, prev_state=None, lock=None):
         c = ((x1 + x2) / 2, (y1 + y2) / 2)
         area = (x2 - x1) * (y2 - y1)
         if cid in GHOST_IDS:
-            ghosts.append(c)
+            ghosts.append((c, cid))
         elif cid in SAW_IDS:
             if area > EVENT_SAW_AREA_FRAC * farea:
-                saw_big.append(c)          # 事件电锯(大)：默认不打
+                saw_big.append(c)
             else:
-                regs.append(c)             # 普通电锯(可打碎)：当普通目标
+                regs.append(c)
         else:
             regs.append(c)
 
-    def nearest(lst):
-        return min(lst, key=lambda c: (c[0] - pbox[0]) ** 2 + (c[1] - pbox[1]) ** 2) if lst else None
+    def nearest_center(lst):
+        return min(lst, key=lambda cc: (cc[0] - pbox[0]) ** 2 + (cc[1] - pbox[1]) ** 2) if lst else None
 
-    def dist2(a, b):
-        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+    def inr_of(e):
+        return enemy_in_range(st, e, pbox)
 
-    # 1) 幽灵：带 lock(2s 容错) 锁定照射
+    # 1) 射程内的普通敌人(含未知范围None) 优先——避免幽灵打断交火
+    reg_in = [r for r in regs if inr_of(r) is not False]
+    if reg_in:
+        e = nearest_center(reg_in)
+        _aim_at(gp, pbox, e)
+        return st, inr_of(e), "shoot", len(regs)
+
+    # 2) 幽灵(无射程内敌人时才处理)
     if ghosts:
+        t = nearest_center([g[0] for g in ghosts])
+        tid = next((g[1] for g in ghosts if g[0] == t), None)
+        # lock 防抖
         if lock is not None:
             gc = lock.get("gc")
             keep = gc is not None and (
-                any(dist2(gc, g2) < 80 * 80 for g2 in ghosts)
+                any((gc[0] - g2[0][0]) ** 2 + (gc[1] - g2[0][1]) ** 2 < 80 * 80 for g2 in ghosts)
                 or (time.time() - lock.get("ts", 0.0) < GHOST_DWELL_SEC))
             if keep:
                 t = gc
-            else:
-                t = nearest(ghosts)
-                lock["gc"] = t
-                lock["ts"] = time.time()
-        else:
-            t = nearest(ghosts)
+                tid = lock.get("id")
+        if lock is not None:
+            lock["gc"] = t
+            lock["ts"] = time.time()
+            lock["id"] = tid
         _aim_at(gp, pbox, t)
-        return st, False, "ghost", len(ghosts)
+        mode = "hat" if tid in HAT_GHOST_IDS else "ghost"
+        return st, None, mode, len(ghosts)
     if lock is not None:
         lock.pop("gc", None)
 
-    # 2) 普通目标(含小电锯)
+    # 3) 普通敌人(射程外)：瞄着等
     if regs:
-        e = nearest(regs)
+        e = nearest_center(regs)
         _aim_at(gp, pbox, e)
-        inr = enemy_in_range(st, e, pbox)
-        can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
-        mode = "shoot" if can_fire else "wait"
-        return st, can_fire, mode, len(regs)
+        return st, inr_of(e), "wait", len(regs)
 
-    # 3) 大电锯(事件)：默认不打；进射程(推开自保)或没有其它目标可打 → 可打
+    # 4) 大电锯(事件)
     if saw_big:
-        s = nearest(saw_big)
+        s = nearest_center(saw_big)
         _aim_at(gp, pbox, s)
-        inr = enemy_in_range(st, s, pbox)
-        can_fire = bool(inr) and st.get("ammo") is not None and st["ammo"] >= 1
-        mode = "saw"
-        return st, can_fire, mode, len(saw_big)
+        return st, inr_of(s), "saw", len(saw_big)
 
     reset_controls(gp)
-    return st, False, mode, 0
+    return st, None, "idle", 0
 
 
 def dead_now(frame, z_center, z_hp):
@@ -300,6 +305,8 @@ def main():
         prev_play = running["play"]
         prev_state = None
         lock = {}
+        ammo_est = None
+        reload_until = 0.0
         while running["v"]:
             t0 = time.time()
             frame = np.array(sct.grab(monitor))
@@ -359,20 +366,42 @@ def main():
                     pass
             elif running["play"] and not dead and not args.dry:
                 pbox = find_player(res, frame)
-                st, can_fire, mode, n_enemy = policy(res, frame, gp, pbox, prev_state, lock)
+                st, inr, mode, n_enemy = policy(res, frame, gp, pbox, prev_state, lock)
                 prev_state = st
+
+                # ---- 内部弹药估计(视觉看不清时也能维持装填纪律) ----
+                if st.get("ammo") is not None and st["ammo"] >= 1:
+                    ammo_est = st["ammo"]
+                if ammo_est is not None and ammo_est == 0 and time.time() >= reload_until:
+                    ammo_est = 3                       # 装填完成
+                eff = ammo_est if ammo_est is not None else st.get("ammo")
+                eff_ok = eff is None or eff >= 1        # 未知=允许(暴风雨等场景)
+
+                # 开火判定：shoot/saw(在射程或未知) 与 hat(打帽)；ghost/wait/idle 不扣扳机
+                if mode == "ghost" or mode == "wait" or mode == "idle":
+                    can_fire = False
+                elif mode == "hat":
+                    can_fire = eff_ok                    # 打帽阶段允许开枪
+                else:                                    # shoot / saw
+                    can_fire = eff_ok and inr is not False
+
                 if can_fire:
                     last_hit = time.time()
-                # 半自动：可开火(框到且有弹)才按节奏扣扳机(幽灵模式不扣)
-                if can_fire and mode != "ghost" and (time.time() - last_shot) >= FIRE_PERIOD_SEC:
-                    gp.right_trigger_float(1.0); gp.update(); time.sleep(RT_PULSE_SEC)
-                    gp.right_trigger_float(0.0); gp.update()
-                    last_shot = time.time()
+                    if (time.time() - last_shot) >= FIRE_PERIOD_SEC:
+                        gp.right_trigger_float(1.0); gp.update(); time.sleep(RT_PULSE_SEC)
+                        gp.right_trigger_float(0.0); gp.update()
+                        last_shot = time.time()
+                        if ammo_est is None:
+                            ammo_est = 3                 # 未知弹药按满3计
+                        ammo_est -= 1
+                        if ammo_est <= 0:
+                            ammo_est = 0
+                            reload_until = time.time() + RELOAD_SEC
                 if args.verbose and (time.time() - last_log) > 1.0:
                     last_log = time.time()
                     aim = round(st["aim_deg"], 1) if st["aim_deg"] is not None else None
-                    print(f"  [DBG] 模式={mode} 敌={n_enemy} 弹={st['ammo']} aim={aim} "
-                          f"半角={st['half']} 开火={can_fire}")
+                    print(f"  [DBG] 模式={mode} 敌={n_enemy} 弹视觉={st['ammo']} "
+                          f"弹估={eff} aim={aim} 半角={st['half']} inr={inr} 开火={can_fire}")
             else:
                 reset_controls(gp)  # 暂停态保持摇杆/扳机归零
 
