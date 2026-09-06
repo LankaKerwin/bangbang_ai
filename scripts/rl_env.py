@@ -40,6 +40,7 @@ import vgamepad as vg
 
 from perception import m0b_state, m0b_vector
 from auto_restart import _count_solid_hearts   # 复用血量计数(实心心, 颜色无关)
+from score_ocr import read_score              # 右上角分数OCR(击杀奖励信号)
 
 OBS_DIM = 159
 
@@ -69,6 +70,9 @@ AFTER_RESTART_WAIT = 1.0
 REWARD_SURVIVE = 0.001      # 每步存活
 REWARD_HP_LOST = -1.0       # 每损失 1 颗心
 REWARD_DEATH = -5.0         # 回合结束(死亡)额外惩罚
+REWARD_PER_POINT = 0.005    # 每涨1分奖励; 挡位单杀分 白60/蓝180/黄360/红600
+                            # → 单杀奖励 ≈ 0.3/0.9/1.8/3.0 (鼓励冲高挡, 分数越高奖励越多)
+SCORE_SAMPLE_EVERY = 5      # 每N步采样一次分数(分数单调不减, Δ累计总奖励不变, 省OCR开销)
 # ============================================================
 
 
@@ -283,6 +287,9 @@ class BangBangEnv(gym.Env):
         self._boat_run = 0
         self._shop_run = 0
         self._prev_dead = False
+        self._prev_score = None      # 分数OCR基线(击杀奖励)
+        self._steps_alive = 0        # 本局已走步数(回合结束诊断)
+        self._round_t0 = time.time()
 
         fr = self._grab()
         if _count_solid_hearts(fr, self._zones(fr)) <= 0:
@@ -334,11 +341,27 @@ class BangBangEnv(gym.Env):
                                 self._hurt_from if self._hurt_from is not None else None)
         self._prev_hp = hearts
 
+        self._steps_alive += 1          # 回合存活计步
         reward = REWARD_SURVIVE
         if dhp > 0:
             reward += REWARD_HP_LOST * dhp
         if dead:
             reward += REWARD_DEATH
+            print("[回合结束] 存活%d步 %.1fs (hp=%d)" % (self._steps_alive,
+                  time.time() - self._round_t0, hearts))
+
+        # 分数OCR → 击杀奖励: 涨分即正反馈; 采样周期SCORE_SAMPLE_EVERY减开销
+        # (死亡帧/读不出跳过; 跨采样窗口的涨分合并给奖励, 总奖励一致)
+        if not dead and self._steps_alive % SCORE_SAMPLE_EVERY == 0:
+            score = read_score(frame)
+            if score is not None:
+                if self._prev_score is None:
+                    self._prev_score = score          # 首帧基线
+                else:
+                    ds = score - self._prev_score
+                    if ds > 0:
+                        reward += REWARD_PER_POINT * ds
+                        self._prev_score = score      # 只信涨的, 防OCR抖动回退
 
         # 4) 商店: 非死亡时自动退出(不购买); 死亡则摇杆清零
         in_shop = False
