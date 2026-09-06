@@ -36,9 +36,10 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     env = DummyVecEnv([lambda: BangBangEnv(MODEL_PATH, region=args.region)])
+    # device="cpu": 小 MLP 在 CPU 上训练即可；GPU 留给 游戏渲染+YOLO(8GB 显存三家分会 OOM/卡顿)
     model = PPO("MlpPolicy", env, verbose=1, n_steps=2048, batch_size=256,
                 learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
-                clip_range=0.2, ent_coef=0.01, n_epochs=10)
+                clip_range=0.2, ent_coef=0.01, n_epochs=10, device="cpu")
 
     print(f"开始训练 {args.timesteps} 步... (模型存 {SAVE_DIR})")
     model.learn(total_timesteps=args.timesteps)
