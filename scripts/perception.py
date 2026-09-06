@@ -89,9 +89,11 @@ def m0b_state(bgr, detections, prev_state=None, prev_gray=None,
     near = near[:K_ENEMY]
 
     # 3) 弹幕危险栅格(prev_gray 给定时只计移动弹) + 障碍物粗栅格
-    bullets, grid = danger_grid(bgr, player_c, prev_gray=prev_gray)
+    #    ★降采样: 栅格是 16扇区×3圈 宏观量, 低分辨率足够(实测obs段0.51s/步=全图Canny/HSV主犯)
+    #      danger 0.66x(面积阈值同步缩放防漏弹) / obstacle 0.5x(Canny无面积阈值,最安全)
+    bullets, grid = danger_grid(bgr, player_c, prev_gray=prev_gray, scale=0.66)
     grid_list = [float(x) for x in grid]
-    obstacle = [float(x) for x in obstacle_grid(bgr, player_c)]
+    obstacle = [float(x) for x in obstacle_grid(bgr, player_c, scale=0.5)]
 
     # 4) 掉落候选(最近 K_DROP)
     drops = []

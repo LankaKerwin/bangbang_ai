@@ -28,8 +28,29 @@ def _clean(s):
     return re.sub(r"[\s!！。·、,，\-—~～:：]", "", s)
 
 
-def detect_reward_time(bgr):
-    """检测本帧中央大字是否为「奖励时间」。返回 bool。"""
+def _announce_ratio(bgr):
+    """廉价预检: 中央大字带内 亮/高饱和 像素占比。
+    公告大字(奖励时间等)出现时该占比暴涨(样例粉色≈0.97), 普通战斗帧很低。
+    占比高才值得跑 OCR — 避免无公告帧空转全检测。返回 float。"""
+    h, w = bgr.shape[:2]
+    x0, x1, y0, y1 = ROI
+    roi = bgr[int(h * y0):int(h * y1), int(w * x0):int(w * x1)]
+    if roi.size == 0:
+        return 0.0
+    small = cv2.resize(roi, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+    bright = float((v > 150).mean())
+    sat = float(((s > 120) & (v > 100)).mean())
+    return max(bright, sat)
+
+
+def detect_reward_time(bgr, skip_ratio=0.15):
+    """检测本帧中央大字是否为「奖励时间」。返回 bool。
+    skip_ratio: 大字带亮/彩占比低于此值直接返回 False(不跑OCR)。"""
+    if _announce_ratio(bgr) < skip_ratio:
+        return False
     h, w = bgr.shape[:2]
     x0, x1, y0, y1 = ROI
     roi = bgr[int(h * y0):int(h * y1), int(w * x0):int(w * x1)]

@@ -66,10 +66,15 @@ def _small_blobs(mask, amin, amax, smax):
     return out
 
 
-def detect_enemy_bullets(bgr, prev_gray=None, move_diff=8.0):
-    """敌方弹：小色块。prev_gray 给定时加"移动判据"——只算在动的(滤静止碎片/手/果)。"""
+def detect_enemy_bullets(bgr, prev_gray=None, move_diff=8.0,
+                         amin=None, amax=None, smax=None):
+    """敌方弹：小色块。prev_gray 给定时加"移动判据"——只算在动的(滤静止碎片/手/果)。
+    amin/amax/smax 可覆盖面积阈值(降采样时按 scale²/scale 同步缩放, 防漏弹)。"""
+    amin = BULLET_AREA_MIN if amin is None else amin
+    amax = BULLET_AREA_MAX if amax is None else amax
+    smax = BULLET_SQUARE_MAX if smax is None else smax
     mask = _mask_for_ranges(bgr, ENEMY_BULLET_HSV)
-    blobs = _small_blobs(mask, BULLET_AREA_MIN, BULLET_AREA_MAX, BULLET_SQUARE_MAX)
+    blobs = _small_blobs(mask, amin, amax, smax)
     if prev_gray is None:
         return blobs
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -83,27 +88,41 @@ def detect_enemy_bullets(bgr, prev_gray=None, move_diff=8.0):
     return out
 
 
-def danger_grid(bgr, player_center, prev_gray=None, debug_draw=None):
+def danger_grid(bgr, player_center, prev_gray=None, debug_draw=None, scale=1.0):
     """返回 (bullets_xy, grid)。grid 形状 [N_SECTORS*len(RINGS_PX)]。
-    prev_gray: 上一帧灰度；给定时敌弹只计"在动"的。"""
-    blobs = detect_enemy_bullets(bgr, prev_gray)
+    prev_gray: 上一帧灰度；给定时敌弹只计"在动的"。
+    scale: 感知降采样(0~1)——图/坐标/圈半径/面积阈值同步缩放, 语义不变。
+           grid 是 16扇区×3圈 宏观量, 低分辨率完全够算。"""
+    if scale != 1.0:
+        bgr = cv2.resize(bgr, None, fx=scale, fy=scale,
+                         interpolation=cv2.INTER_AREA)
+        player_center = (player_center[0] * scale, player_center[1] * scale)
+        if prev_gray is not None:
+            prev_gray = cv2.resize(prev_gray, None, fx=scale, fy=scale,
+                                   interpolation=cv2.INTER_AREA)
+        blobs = detect_enemy_bullets(bgr, prev_gray,
+                                     amin=max(2, int(BULLET_AREA_MIN * scale * scale)),
+                                     amax=int(BULLET_AREA_MAX * scale * scale),
+                                     smax=max(8, int(BULLET_SQUARE_MAX * scale)))
+    else:
+        blobs = detect_enemy_bullets(bgr, prev_gray)
     px, py = player_center
-    rings = len(RINGS_PX)
-    grid = np.zeros(N_SECTORS * rings, dtype=np.float32)
+    rings = [r * scale for r in RINGS_PX]
+    grid = np.zeros(N_SECTORS * len(rings), dtype=np.float32)
     for (cx, cy, _area) in blobs:
         d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
         if d < 1:
             continue
-        # 找所在圈(按RINGS阈值)
-        ring = next((ri for ri, rr in enumerate(RINGS_PX) if d <= rr), rings - 1)
+        # 找所在圈(按缩放后的RINGS)
+        ring = next((ri for ri, rr in enumerate(rings) if d <= rr), len(rings) - 1)
         a = np.degrees(np.arctan2(cy - py, cx - px))
         sec = int(((a + 180) % 360) / (360.0 / N_SECTORS)) % N_SECTORS
         # 威胁度：越近越高(内圈系数更大)
-        coef = 1.0 / (1.0 + d / RINGS_PX[-1])
-        grid[sec * rings + ring] += coef
+        coef = 1.0 / (1.0 + d / rings[-1])
+        grid[sec * len(rings) + ring] += coef
         if debug_draw is not None:
-            cv2.circle(debug_draw, (int(cx), int(cy)), 6, (0, 0, 255), 1)
-    return [(b[0], b[1]) for b in blobs], grid
+            cv2.circle(debug_draw, (int(cx / scale), int(cy / scale)), 6, (0, 0, 255), 1)
+    return [(b[0] / scale, b[1] / scale) for b in blobs], grid
 
 
 def detect_drops(bgr, debug_draw=None):
@@ -124,12 +143,18 @@ def grid_sector_angle(sec):
     return -180.0 + (sec + 0.5) * (360.0 / N_SECTORS)
 
 
-def obstacle_grid(bgr, player_center, rings=None):
+def obstacle_grid(bgr, player_center, rings=None, scale=1.0):
     """障碍物粗栅格(16扇区×N圈)：用边缘密度近似"实体区域"。
-    不区分敌人/藤蔓/电锯，只告诉决策层"哪个方向有东西"(YOLO漏检也能兜底)。"""
-    rings = rings or RINGS_PX
+    不区分敌人/藤蔓/电锯，只告诉决策层"哪个方向有东西"(YOLO漏检也能兜底)。
+    scale: 感知降采样——障碍栅格是宏观边缘密度, 低分辨率足够; 圈半径同步缩放。"""
+    rings = [r * scale for r in (rings or RINGS_PX)]
     px, py = player_center
     h, w = bgr.shape[:2]
+    if scale != 1.0:
+        bgr = cv2.resize(bgr, None, fx=scale, fy=scale,
+                         interpolation=cv2.INTER_AREA)
+        px, py = px * scale, py * scale
+        h, w = bgr.shape[:2]
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 45, 130)
     k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))

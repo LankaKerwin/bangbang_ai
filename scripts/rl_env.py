@@ -73,7 +73,8 @@ REWARD_HP_LOST = -1.0       # 每损失 1 颗心
 REWARD_DEATH = -5.0         # 回合结束(死亡)额外惩罚
 REWARD_PER_POINT = 0.005    # 每涨1分奖励; 挡位单杀分 白60/蓝180/黄360/红600
                             # → 单杀奖励 ≈ 0.3/0.9/1.8/3.0 (鼓励冲高挡, 分数越高奖励越多)
-SCORE_SAMPLE_EVERY = 5      # 每N步采样一次分数(分数单调不减, Δ累计总奖励不变, 省OCR开销)
+SCORE_SAMPLE_EVERY = 10    # 每N步采样一次分数(分数单调不减, Δ累计总奖励不变, 省OCR开销; 10步=1s延迟可扛)
+BOSS_SAMPLE_EVERY = 5      # 大字检测采样间隔(普通帧走廉价亮彩预检≈0开销, 公告帧才跑OCR)
 REWARD_BOSS_KILL = 50.0     # Boss击杀(奖励时间公告出现)一次性奖励 = 结算+10000分等值(×0.005)
 # ============================================================
 
@@ -156,6 +157,8 @@ class BangBangEnv(gym.Env):
         self._shop_run = 0
         self._last_shop_act = 0.0
         self._prev_dead = False
+        self._acc = {"act": 0.0, "sense": 0.0, "obs": 0.0, "shop": 0.0, "sleep": 0.0}
+        self._n_acc = 0
 
     # ---------- 采集/工具 ----------
     def _grab(self):
@@ -327,11 +330,13 @@ class BangBangEnv(gym.Env):
             self.gp.update()
             if float(action[2]) > FIRE_THRESH:
                 self._fire()
+        t_act = time.time()
 
         # 2) 抓帧 → 感知(血量/YOLO) → 判死(船消失+血量空)
         frame = self._grab()
         detects, pbox, boat, hearts = self._sense(frame)
         dead = self._is_dead(boat, hearts)
+        t_sense = time.time()
 
         # 3) 受伤记忆 + 奖励
         dhp = 0
@@ -354,8 +359,7 @@ class BangBangEnv(gym.Env):
             print("[回合结束] 存活%d步 %.1fs (hp=%d)" % (self._steps_alive,
                   time.time() - self._round_t0, hearts))
 
-        # 分数OCR → 击杀奖励: 涨分即正反馈; 采样周期SCORE_SAMPLE_EVERY减开销
-        # (死亡帧/读不出跳过; 跨采样窗口的涨分合并给奖励, 总奖励一致)
+        # 分数OCR → 击杀奖励 (每SCORE_SAMPLE_EVERY步; 死亡帧跳过; 涨分跨窗合并总奖励一致)
         if not dead and self._steps_alive % SCORE_SAMPLE_EVERY == 0:
             score = read_score(frame)
             if score is not None:
@@ -366,12 +370,14 @@ class BangBangEnv(gym.Env):
                     if ds > 0:
                         reward += REWARD_PER_POINT * ds
                         self._prev_score = score      # 只信涨的, 防OCR抖动回退
-            # Boss击杀: 中央"奖励时间"大字上升沿 → 一次性大奖励(active锁防重复)
+        # Boss击杀: 中央"奖励时间"大字上升沿 → 一次性大奖励(active锁防重复)
+        if not dead and self._steps_alive % BOSS_SAMPLE_EVERY == 0:
             rt = detect_reward_time(frame)
             if rt and not self._reward_time_on:
                 reward += REWARD_BOSS_KILL
                 print("[Boss击杀] 奖励时间公告! +%.1f" % REWARD_BOSS_KILL)
             self._reward_time_on = rt
+        t_obs = time.time()
 
         # 4) 商店: 非死亡时自动退出(不购买); 死亡则摇杆清零
         in_shop = False
@@ -382,11 +388,22 @@ class BangBangEnv(gym.Env):
             reset_controls(self.gp)
 
         self._prev_dead = dead
+        t_shop = time.time()
 
         # 5) 步频控制(与帧率对齐)
         dt = time.time() - t0
+        sleep_dt = 0.0
         if dt < self.interval:
-            time.sleep(self.interval - dt)
+            sleep_dt = self.interval - dt
+            time.sleep(sleep_dt)
+
+        # 计时累计(profile_env_steps 用)
+        self._acc["act"] += t_act - t0
+        self._acc["sense"] += t_sense - t_act
+        self._acc["obs"] += t_obs - t_sense
+        self._acc["shop"] += t_shop - t_obs
+        self._acc["sleep"] += sleep_dt
+        self._n_acc += 1
 
         info = {"time": time.time(), "hp": hearts, "ammo": self._ammo_est,
                 "dead": dead, "in_shop": in_shop, "dhp": dhp,
