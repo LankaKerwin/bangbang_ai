@@ -41,6 +41,7 @@ import vgamepad as vg
 from perception import m0b_state, m0b_vector
 from auto_restart import _count_solid_hearts   # 复用血量计数(实心心, 颜色无关)
 from score_ocr import read_score              # 右上角分数OCR(击杀奖励信号)
+from bigtext_detect import detect_reward_time # 中央大字检测(Boss击杀=奖励时间公告)
 
 OBS_DIM = 159
 
@@ -73,6 +74,7 @@ REWARD_DEATH = -5.0         # 回合结束(死亡)额外惩罚
 REWARD_PER_POINT = 0.005    # 每涨1分奖励; 挡位单杀分 白60/蓝180/黄360/红600
                             # → 单杀奖励 ≈ 0.3/0.9/1.8/3.0 (鼓励冲高挡, 分数越高奖励越多)
 SCORE_SAMPLE_EVERY = 5      # 每N步采样一次分数(分数单调不减, Δ累计总奖励不变, 省OCR开销)
+REWARD_BOSS_KILL = 50.0     # Boss击杀(奖励时间公告出现)一次性奖励 = 结算+10000分等值(×0.005)
 # ============================================================
 
 
@@ -288,6 +290,7 @@ class BangBangEnv(gym.Env):
         self._shop_run = 0
         self._prev_dead = False
         self._prev_score = None      # 分数OCR基线(击杀奖励)
+        self._reward_time_on = False # 是否在奖励时间中(防重复给Boss奖励)
         self._steps_alive = 0        # 本局已走步数(回合结束诊断)
         self._round_t0 = time.time()
 
@@ -362,6 +365,12 @@ class BangBangEnv(gym.Env):
                     if ds > 0:
                         reward += REWARD_PER_POINT * ds
                         self._prev_score = score      # 只信涨的, 防OCR抖动回退
+            # Boss击杀: 中央"奖励时间"大字上升沿 → 一次性大奖励(active锁防重复)
+            rt = detect_reward_time(frame)
+            if rt and not self._reward_time_on:
+                reward += REWARD_BOSS_KILL
+                print("[Boss击杀] 奖励时间公告! +%.1f" % REWARD_BOSS_KILL)
+            self._reward_time_on = rt
 
         # 4) 商店: 非死亡时自动退出(不购买); 死亡则摇杆清零
         in_shop = False
