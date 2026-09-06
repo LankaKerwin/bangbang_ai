@@ -320,7 +320,8 @@ class BangBangEnv(gym.Env):
             if self._ammo_est is not None and self._ammo_est == 0 \
                     and time.time() >= self._reload_until:
                 self._ammo_est = 3           # 装填完成
-            self.gp.right_joystick_float(
+            # 瞄准摇杆: 左摇杆(真人操作习惯; 游戏双摇杆等效, 录制BC数据也用左摇杆, 字面一致)
+            self.gp.left_joystick_float(
                 x_value_float=float(np.clip(action[0], -1, 1)),
                 y_value_float=float(np.clip(action[1], -1, 1)))
             self.gp.update()
