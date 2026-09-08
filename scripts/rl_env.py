@@ -43,7 +43,11 @@ from auto_restart import _count_solid_hearts   # 复用血量计数(实心心, �
 from score_ocr import read_score              # 右上角分数OCR(击杀奖励信号)
 from bigtext_detect import detect_reward_time # 中央大字检测(Boss击杀=奖励时间公告)
 
-OBS_DIM = 159
+OBS_DIM = 160   # 159 (m0b_vector) + 1: fire_since(距上次开火意图秒数, 射击时序上下文)
+FIRE_SINCE_CAP_SEC = 3.0   # fire_since 原始上限(装填2.5s + 脉冲余量)
+FIRE_SINCE_SAT = 0.85      # 信息窗钳制值(必须与 bc_train.FIRE_SINCE_SAT 一致!):
+                           # 超过 = 早已冷却完毕, 不再携带信息; 不钳到1.0防部署 OOD 死锁
+                           # (agent 不开火→特征恒饱和→落入训练稀有区, 见 exp_selfdrive)
 
 # ================= 可调参数(照 train_driver) =================
 CONF = 0.25                 # YOLO 置信度
@@ -67,15 +71,18 @@ A_PRESS_SEC = 0.15
 RESTART_VERIFY_TRIES = 12   # 重启后最多逐秒验证次数
 MAX_RESTART_ATTEMPTS = 2
 AFTER_RESTART_WAIT = 1.0
-# ================= v0 奖励(待校准) =================
-REWARD_SURVIVE = 0.001      # 每步存活
+# ================= v0 奖励(分数为王: 击杀/Boss主导, 存活死亡轻罚) =================
+REWARD_SURVIVE = 0.0005    # 每步存活(调小: 纯分数导向, 降低"活着白嫖")
 REWARD_HP_LOST = -1.0       # 每损失 1 颗心
-REWARD_DEATH = -5.0         # 回合结束(死亡)额外惩罚
+REWARD_DEATH = -3.0         # 回合结束(死亡)额外惩罚(比-5温和: 死亡有掉心-6兜底, 别过度压制冲分)
 REWARD_PER_POINT = 0.005    # 每涨1分奖励; 挡位单杀分 白60/蓝180/黄360/红600
                             # → 单杀奖励 ≈ 0.3/0.9/1.8/3.0 (鼓励冲高挡, 分数越高奖励越多)
 SCORE_SAMPLE_EVERY = 10    # 每N步采样一次分数(分数单调不减, Δ累计总奖励不变, 省OCR开销; 10步=1s延迟可扛)
 BOSS_SAMPLE_EVERY = 5      # 大字检测采样间隔(普通帧走廉价亮彩预检≈0开销, 公告帧才跑OCR)
 REWARD_BOSS_KILL = 50.0     # Boss击杀(奖励时间公告出现)一次性奖励 = 结算+10000分等值(×0.005)
+# 每局成绩记录(进化观测: 用分数判断 agent 进化程度)
+SCORE_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "models", "rl", "score_log.csv")
 # ============================================================
 
 
@@ -123,7 +130,11 @@ def detect_shop(frame, tpl):
 class BangBangEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, model_path, region=None, fps=10, include_drops=False):
+    def __init__(self, model_path, region=None, fps=10, include_drops=False,
+                 use_fire_since=True):
+        """use_fire_since=False → obs 159 维(无 fire_since): 配合 bc_train --no_fire_since
+        产出的模型。注意 fire_since 是教师动作衍生特征, BC 部署会 OOD 死锁
+        (见 exp_selfdrive), 当前推荐 False; True 保留给未来 LSTM/实验。"""
         super().__init__()
         from ultralytics import YOLO
         self.model = YOLO(model_path)
@@ -131,11 +142,13 @@ class BangBangEnv(gym.Env):
         self.region = region
         self.interval = 1.0 / fps
         self.include_drops = include_drops
+        self.use_fire_since = use_fire_since
+        self.obs_dim = OBS_DIM if use_fire_since else OBS_DIM - 1
 
         # 连续动作: aim_x, aim_y ∈[-1,1]; fire∈[-1,1](>0=扣扳机意图)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Box(low=-5.0, high=5.0,
-                                            shape=(OBS_DIM,), dtype=np.float32)
+                                            shape=(self.obs_dim,), dtype=np.float32)
 
         self._sct = mss.mss()
         self._monitor = None
@@ -150,6 +163,7 @@ class BangBangEnv(gym.Env):
         self._ammo_vis = None              # 最近一帧的视觉弹药读数
         self._reload_until = 0.0
         self._last_shot = 0.0
+        self._last_fire_intent = -1e9   # 上次开火意图时刻(obs 末维 fire_since 用; 负大=早已冷却完毕)
         self._hurt_since = -1e9
         self._hurt_from = None             # 受伤时朝向(0-1 角度归一)
         self._aim_norm = None              # 最近一帧的瞄准朝向(0-1)
@@ -157,6 +171,7 @@ class BangBangEnv(gym.Env):
         self._shop_run = 0
         self._last_shop_act = 0.0
         self._prev_dead = False
+        self._last_boat = True           # 温和停止: 上一帧船可见才执行动作(死亡即停)
         self._acc = {"act": 0.0, "sense": 0.0, "obs": 0.0, "shop": 0.0, "sleep": 0.0}
         self._n_acc = 0
 
@@ -196,7 +211,9 @@ class BangBangEnv(gym.Env):
         return detects, pbox, boat, hearts
 
     def _observe(self, frame, detects, hearts, hurt_recent, hurt_from):
-        """YOLO detects → m0b_state → 159 维向量(照 train_driver 的组装方式)。"""
+        """YOLO detects → m0b_state → 160 维向量(159 + fire_since 时序上下文)。
+        fire_since: 距上次开火意图秒数 / cap, [0,1]; 刚开火≈0(冷却中), 早已冷却≈1。
+        与 BC 训练(离线从 demo 动作序列补算, 单位秒)语义一致。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         st = m0b_state(frame, detects, prev_state=self._prev_state,
                        prev_gray=self._prev_gray, hearts=hearts,
@@ -208,7 +225,11 @@ class BangBangEnv(gym.Env):
         if st["ammo"] is not None and st["ammo"] >= 1:   # 视觉正读数 → 校准内部估计
             self._ammo_est = st["ammo"]
         self._ammo_vis = st["ammo"]
-        return m0b_vector(st), st
+        vec = np.asarray(m0b_vector(st), dtype=np.float32)
+        if self.use_fire_since:
+            fs = min((time.time() - self._last_fire_intent) / FIRE_SINCE_CAP_SEC, FIRE_SINCE_SAT)
+            vec = np.concatenate([vec, np.asarray([fs], dtype=np.float32)])
+        return vec, st
 
     def _is_dead(self, boat, hearts):
         """判死(颜色无关): 玩家船连续消失 ≥HEART_DEAD_FRAMES 且 血量==0。"""
@@ -286,6 +307,7 @@ class BangBangEnv(gym.Env):
         self._ammo_vis = None
         self._reload_until = 0.0
         self._last_shot = 0.0
+        self._last_fire_intent = -1e9   # 上次开火意图时刻(obs 末维 fire_since 用; 负大=早已冷却完毕)
         self._hurt_since = -1e9
         self._hurt_from = None
         self._aim_norm = None
@@ -293,8 +315,10 @@ class BangBangEnv(gym.Env):
         self._shop_run = 0
         self._prev_dead = False
         self._prev_score = None      # 分数OCR基线(击杀奖励)
+        self._cur_score = None       # 最近一次OCR总分(成绩记录/进化观测)
         self._reward_time_on = False # 是否在奖励时间中(防重复给Boss奖励)
         self._steps_alive = 0        # 本局已走步数(回合结束诊断)
+        self._n_fire_intent = 0      # 本局开火意图次数(回合结束诊断: 意图率)
         self._round_t0 = time.time()
 
         fr = self._grab()
@@ -310,14 +334,18 @@ class BangBangEnv(gym.Env):
         detects, pbox, boat, hearts = self._sense(frame)
         obs, st = self._observe(frame, detects, hearts, hurt_recent=0.0, hurt_from=None)
         self._prev_hp = hearts
+        self._last_boat = boat          # 新局首帧: 记录船可见性(决定能否执行动作)
         info = {"time": time.time(), "hp": hearts, "ammo": self._ammo_est,
                 "n_enemy": st["n_enemy"], "dead": False}
         return obs, info
 
     def step(self, action):
         t0 = time.time()
-        # 1) 执行动作: 右摇杆瞄准 + fire>0 → 半自动扣扳机(装填纪律照 train_driver)
-        if self._prev_dead:
+        # 1) 执行动作: 左摇杆瞄准 + fire>0 → 半自动扣扳机(装填纪律照 train_driver)
+        #    温和停止: 上一帧已感知到"船从画面消失"(坠落/死亡开始) → 本帧不再执行任何动作
+        #    (摇杆/扳机全零), 防止结算/菜单光标被输入推移。船一回来自动恢复。
+        #    仅 1 帧船消失误检最多停 1 帧, 绝不误伤活船 — 不用硬锁状态机。
+        if self._prev_dead or not self._last_boat:
             reset_controls(self.gp)
         else:
             if self._ammo_est is not None and self._ammo_est == 0 \
@@ -329,6 +357,8 @@ class BangBangEnv(gym.Env):
                 y_value_float=float(np.clip(action[1], -1, 1)))
             self.gp.update()
             if float(action[2]) > FIRE_THRESH:
+                self._n_fire_intent += 1
+                self._last_fire_intent = time.time()   # 记录意图(即使被纪律拦截, 语义同 demo: 按下即意图)
                 self._fire()
         t_act = time.time()
 
@@ -336,6 +366,7 @@ class BangBangEnv(gym.Env):
         frame = self._grab()
         detects, pbox, boat, hearts = self._sense(frame)
         dead = self._is_dead(boat, hearts)
+        self._last_boat = boat            # 更新船可见性(下一帧据此决定是否执行动作)
         t_sense = time.time()
 
         # 3) 受伤记忆 + 奖励
@@ -356,13 +387,29 @@ class BangBangEnv(gym.Env):
             reward += REWARD_HP_LOST * dhp
         if dead:
             reward += REWARD_DEATH
-            print("[回合结束] 存活%d步 %.1fs (hp=%d)" % (self._steps_alive,
-                  time.time() - self._round_t0, hearts))
+            dur = time.time() - self._round_t0
+            rate = self._n_fire_intent / max(dur, 1e-3)
+            sc = self._cur_score if self._cur_score is not None else -1
+            print("[回合结束] 存活%d步 %.1fs | 分≈%d | 开火意图%d次 = %.2f次/s (听雨基准≈0.5次/s) | hp=%d"
+                  % (self._steps_alive, dur, sc, self._n_fire_intent, rate, hearts))
+            # 成绩 CSV(进化观测: 每局 分/存活/意图率 一行, 醒来画曲线即见进化)
+            try:
+                os.makedirs(os.path.dirname(SCORE_LOG), exist_ok=True)
+                new = not os.path.exists(SCORE_LOG)
+                with open(SCORE_LOG, "a", encoding="utf-8") as f:
+                    if new:
+                        f.write("wall_clock,steps,seconds,score,fire_per_s,hp\n")
+                    f.write("%s,%d,%.1f,%d,%.2f,%d\n" % (
+                        time.strftime("%H:%M:%S"), self._steps_alive, dur,
+                        sc, rate, hearts))
+            except Exception as e:
+                print("写成绩CSV失败: %s" % e)
 
         # 分数OCR → 击杀奖励 (每SCORE_SAMPLE_EVERY步; 死亡帧跳过; 涨分跨窗合并总奖励一致)
         if not dead and self._steps_alive % SCORE_SAMPLE_EVERY == 0:
             score = read_score(frame)
             if score is not None:
+                self._cur_score = score            # 记录最新读数(成绩/进化观测)
                 if self._prev_score is None:
                     self._prev_score = score          # 首帧基线
                 else:
@@ -412,6 +459,10 @@ class BangBangEnv(gym.Env):
 
     def close(self):
         reset_controls(self.gp)
+        try:
+            self.gp.update()
+        except Exception:
+            pass
         try:
             self._sct.close()
         except Exception:

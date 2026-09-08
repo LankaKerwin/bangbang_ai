@@ -150,6 +150,43 @@ def m0b_vector(st):
     return np.array(v, dtype=np.float32)
 
 
+# ============ 外部"可打性"特征(追加段, 无自指积分) ============
+# 动机: fire_since(教师动作衍生)部署会 OOD 死锁(见 exp_selfdrive); fire/aim 联动
+# 必须由外部可观测量驱动。159 维里已有 aim_norm 与每敌 ang/dist/inr, 但模型要自己
+# 组合 6 敌 → 学不动(no-fs 灵敏度仅27%)。这里显式聚合, 两端(demo向量/实时st)同源。
+# 注意: aim_miss 依赖当前朝向(aim_norm=上一帧 aim 动作的结果), 是单步闭环非积分 → 无死锁。
+# ★ 射程修正: enemy_in_range 用 radius×1.1 当射程, 但实测听雨 99% 开火目标在 3.0×radius 内
+#   (弹药弧半径≠真实射程, 见诊断) → ext 的距离判据用 RANGE_MULT×radius, 不再信 inr 列。
+EXT_N = 3
+RANGE_MULT = 3.0     # 实测可命中距离 ≈ 3×弹药弧半径(开火目标 p99=3.0×radius)
+ANG_TOL = 0.10       # 角度容差(归一 0.1=36°; 聚合用, 比视觉 half 宽松以覆盖散布)
+# v 布局(照 m0b_vector docstring): v[5]=aim_norm; nearest i 基址 13+5i:
+#   +0 ang_norm, +1 dist_norm, +2 grp/4, +3 inr, +4 dx
+_NEAR_BASE = 13
+_NEAR_STRIDE = 5
+
+
+def ext_target_feats(v):
+    """v: m0b_vector(159) → 3 维:
+    [has_targetable(0/1: 3×弧半径内有敌), aim_miss_to_target(有=其中准星角差最小者的环绕差, 无=1.0),
+     target_dist(有=该敌 dist_norm, 无=1.0)]
+    环绕角差 = min(|a-e|, 1-|a-e|) 处理 0/1 环绕。"""
+    aim = float(v[5])
+    best_miss, best_dist, has = 1.0, 1.0, 0.0
+    for i in range(K_ENEMY):
+        b = _NEAR_BASE + i * _NEAR_STRIDE
+        if float(v[b + 1]) > RANGE_MULT:   # 超出可命中距离
+            continue
+        ang = float(v[b])
+        d = abs(aim - ang)
+        miss = min(d, 1.0 - d)
+        if miss < best_miss:               # 选准星角差最小(而非距离最小)的可打敌
+            best_miss = miss
+            best_dist = float(v[b + 1])
+            has = 1.0
+    return np.array([has, best_miss, best_dist], dtype=np.float32)
+
+
 def _circular_mean(angles_deg):
     """多角度的圆均值(度)，处理 ±180 跨越。"""
     rad = np.radians(angles_deg)

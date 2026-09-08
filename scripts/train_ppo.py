@@ -29,6 +29,10 @@ def main():
     parser.add_argument("--total_timesteps_placeholder", help="忽略(占位)")
     parser.add_argument("--ckpt_freq", type=int, default=2048,
                         help="每隔 N 步存一次中途模型到 models/rl(默认2048; 0=关闭)")
+    parser.add_argument("--resume", default=None,
+                        help="从已有模型 zip 续训(默认None=从零)")
+    parser.add_argument("--no_fire_since", action="store_true",
+                        help="env 用 159 维(无 fire_since), 配 bc_train --no_fire_since 产出的模型")
     args = parser.parse_args()
 
     from stable_baselines3 import PPO
@@ -39,11 +43,16 @@ def main():
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    env = DummyVecEnv([lambda: Monitor(BangBangEnv(MODEL_PATH, region=args.region))])
-    # device="cpu": 小 MLP 在 CPU 上训练即可；GPU 留给 游戏渲染+YOLO(8GB 显存三家分会 OOM/卡顿)
-    model = PPO("MlpPolicy", env, verbose=1, n_steps=2048, batch_size=256,
-                learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
-                clip_range=0.2, ent_coef=0.01, n_epochs=10, device="cpu")
+    env = DummyVecEnv([lambda: Monitor(BangBangEnv(
+        MODEL_PATH, region=args.region, use_fire_since=not args.no_fire_since))])
+    if args.resume:
+        model = PPO.load(args.resume, env=env, device="cpu")
+        print(f"已加载续训: {args.resume} (已有 {int(model.num_timesteps)} 步)")
+    else:
+        # device="cpu": 小 MLP 在 CPU 上训练即可；GPU 留给 游戏渲染+YOLO(8GB 显存三家分会 OOM/卡顿)
+        model = PPO("MlpPolicy", env, verbose=1, n_steps=2048, batch_size=256,
+                    learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
+                    clip_range=0.2, ent_coef=0.01, n_epochs=10, device="cpu")
 
     from stable_baselines3.common.callbacks import CheckpointCallback
 
